@@ -33,10 +33,114 @@ interface TerrainDimensions {
   elevationScale: number;
 }
 
+interface FetchOptions {
+  endpoint?: string;
+  method?: "GET" | "POST" | "PUT" | "DELETE";
+  body?: any;
+  headers?: Record<string, string>;
+}
+
+interface ElevationRequest {
+  lat: number;
+  lng: number;
+  area: number;
+}
+
+const API_BASE_URL = "https://pangolin-enormous-briefly.ngrok-free.app";
+
+// Generic fetch function that can be used for any API endpoint
+const fetchFromAPI = async <T,>({
+  endpoint = "/data/data.json",
+  method = "GET",
+  body,
+  headers = {},
+}: FetchOptions = {}): Promise<T> => {
+  try {
+    const url = endpoint.startsWith("http")
+      ? endpoint
+      : `${API_BASE_URL}${endpoint}`;
+
+    const requestOptions: RequestInit = {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...headers,
+      },
+      ...(body && { body: JSON.stringify(body) }),
+    };
+
+    const response = await fetch(url, requestOptions);
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data as T;
+  } catch (error) {
+    console.error("API request failed:", error);
+    throw error;
+  }
+};
+
+// Function to fetch elevation data from the API
+const fetchElevationData = async (
+  params: ElevationRequest
+): Promise<TerrainData> => {
+  return fetchFromAPI<TerrainData>({
+    endpoint: "/elevation",
+    method: "POST",
+    body: {
+      lat: params.lat,
+      lng: params.lng,
+      area: params.area,
+    },
+  });
+};
+
 const fetchData = async () => {
   try {
     const response = await fetch("/data/data2.json");
     const data: TerrainData = await response.json();
+    return {
+      points: data.points,
+      gridSize: Math.sqrt(data.points_count),
+      step: data.step_m,
+    };
+  } catch (error) {
+    console.error("Error loading terrain data:", error);
+    return null;
+  }
+};
+
+// Specific function to fetch terrain data
+const fetchTerrainData = async (location?: {
+  lat: number;
+  lng: number;
+  area: number;
+}): Promise<{
+  points: TerrainPoint[];
+  gridSize: number;
+  step: number;
+} | null> => {
+  try {
+    let data: TerrainData;
+
+    if (location) {
+      data = await fetchElevationData({
+        lat: location.lat,
+        lng: location.lng,
+        area: location.area, // Default area, adjust as needed
+      });
+    } else {
+      // Fallback to default location if none provided
+      data = await fetchElevationData({
+        lat: 17.926609,
+        lng: 73.807198,
+        area: 8,
+      });
+    }
+
     return {
       points: data.points,
       gridSize: Math.sqrt(data.points_count),
@@ -86,14 +190,13 @@ const calculateElevationScale = (points: TerrainPoint[]) => {
   let minElevation = Infinity;
   let maxElevation = -Infinity;
 
-  // Find min and max elevations in a single pass
   for (const point of points) {
     if (point.elevation < minElevation) minElevation = point.elevation;
     if (point.elevation > maxElevation) maxElevation = point.elevation;
   }
 
   const elevationRange = maxElevation - minElevation;
-  const targetRange = 2000; // Similar to your original scale
+  const targetRange = 800;
 
   return targetRange / elevationRange;
 };
@@ -102,119 +205,152 @@ const Terrain: React.FC<{
   onDimensionsCalculated: (dimensions: TerrainDimensions) => void;
 }> = ({ onDimensionsCalculated }) => {
   const [terrainMesh, setTerrainMesh] = useState<THREE.Mesh | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const loadTerrain = async () => {
-      const data = await fetchData();
-      if (!data) return;
+      try {
+        const data = await fetchTerrainData();
+        console.log("HHUHUH", data);
+        // var fs = require('fs');
+        // fs.writeFile("test.txt", data, function(err) {
+        //     if (err) {
+        //         console.log(err);
+        //     }
+        // });
+        if (!data) {
+          setError("Failed to load terrain data");
+          return;
+        }
 
-      const { points, gridSize, step } = data;
+        const { points, gridSize } = data;
 
-      // Smooth the elevation data
-      const smoothedPoints = smoothElevationData(points, gridSize, 5);
-      const elevationScale = calculateElevationScale(smoothedPoints);
+        const step = 20;
+        console.log(step);
 
-      // Create geometry with adjusted dimensions
-      const terrainWidth = gridSize * step;
-      const terrainHeight = gridSize * step;
-      const geometry = new THREE.PlaneGeometry(
-        terrainWidth,
-        terrainHeight,
-        gridSize - 1,
-        gridSize - 1
-      );
+        const smoothedPoints = smoothElevationData(points, gridSize, 5);
+        const elevationScale = calculateElevationScale(smoothedPoints);
 
-      // Update vertices
-      const vertices = geometry.attributes.position.array as Float32Array;
-      const colors = new Float32Array(vertices.length);
+        const terrainWidth = gridSize * step;
+        const terrainHeight = gridSize * step;
+        const geometry = new THREE.PlaneGeometry(
+          terrainWidth,
+          terrainHeight,
+          gridSize - 1,
+          gridSize - 1
+        );
 
-      // Find elevation range for color mapping
-      let minElevation = Infinity;
-      let maxElevation = -Infinity;
+        const vertices = geometry.attributes.position.array as Float32Array;
+        const colors = new Float32Array(vertices.length);
 
-      // Find min and max in a single pass
-      for (const point of smoothedPoints) {
-        if (point.elevation < minElevation) minElevation = point.elevation;
-        if (point.elevation > maxElevation) maxElevation = point.elevation;
+        let minElevation = Infinity;
+        let maxElevation = -Infinity;
+
+        for (const point of smoothedPoints) {
+          if (point.elevation < minElevation) minElevation = point.elevation;
+          if (point.elevation > maxElevation) maxElevation = point.elevation;
+        }
+
+        const elevationRange = maxElevation - minElevation;
+
+        for (let i = 0; i < smoothedPoints.length; i++) {
+          const vertexIndex = i * 3;
+          const elevation = smoothedPoints[i].elevation;
+
+          vertices[vertexIndex + 2] = elevation * elevationScale;
+
+          const normalizedElevation =
+            (elevation - minElevation) / elevationRange;
+          colors[vertexIndex] = 0.2 + normalizedElevation * 0.3;
+          colors[vertexIndex + 1] = 0.4 + normalizedElevation * 0.4;
+          colors[vertexIndex + 2] = 0.2;
+        }
+
+        geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+        geometry.computeVertexNormals();
+
+        const mesh = new THREE.Mesh(
+          geometry,
+          new THREE.MeshStandardMaterial({
+            vertexColors: true,
+            side: THREE.DoubleSide,
+            roughness: 0.8,
+            metalness: 0.2,
+          })
+        );
+
+        mesh.rotation.x = -Math.PI / 2;
+        setTerrainMesh(mesh);
+
+        onDimensionsCalculated({
+          width: terrainWidth,
+          height: terrainHeight,
+          maxElevation: maxElevation * elevationScale,
+          elevationScale: elevationScale,
+        });
+      } catch (err) {
+        setError("Error generating terrain mesh");
+        console.error(err);
       }
-
-      const elevationRange = maxElevation - minElevation;
-
-      // Update vertices and colors
-      for (let i = 0; i < smoothedPoints.length; i++) {
-        const vertexIndex = i * 3;
-        const elevation = smoothedPoints[i].elevation;
-
-        // Apply elevation scale to vertex height
-        vertices[vertexIndex + 2] = elevation * elevationScale;
-
-        // Calculate color based on elevation
-        const normalizedElevation = (elevation - minElevation) / elevationRange;
-        colors[vertexIndex] = 0.2 + normalizedElevation * 0.3; // R
-        colors[vertexIndex + 1] = 0.4 + normalizedElevation * 0.4; // G
-        colors[vertexIndex + 2] = 0.2; // B
-      }
-
-      geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-      geometry.computeVertexNormals();
-
-      // Create mesh
-      const mesh = new THREE.Mesh(
-        geometry,
-        new THREE.MeshStandardMaterial({
-          vertexColors: true,
-          side: THREE.DoubleSide,
-          roughness: 0.8,
-          metalness: 0.2,
-        })
-      );
-
-      mesh.rotation.x = -Math.PI / 2;
-      setTerrainMesh(mesh);
-
-      // Notify parent component about terrain dimensions
-      onDimensionsCalculated({
-        width: terrainWidth,
-        height: terrainHeight,
-        maxElevation: maxElevation * elevationScale,
-        elevationScale: elevationScale,
-      });
     };
 
     loadTerrain();
-  }, [onDimensionsCalculated]);
+  }, []);
+
+  if (error) {
+    return (
+      <mesh>
+        <boxGeometry args={[1, 1, 1]} />
+        <meshStandardMaterial color="red" />
+      </mesh>
+    );
+  }
 
   return terrainMesh ? <primitive object={terrainMesh} /> : null;
 };
 
-const TerrainScene: React.FC = () => {
-  const [cameraSettings, setCameraSettings] = useState({
-    position: [10000, 15000, -2000],
+interface CameraSettings {
+  position: [number, number, number];
+  fov: number;
+}
+
+interface TerrainSceneProps {
+  lat?: number;
+  long?: number;
+  area?: number;
+}
+
+const TerrainScene: React.FC<TerrainSceneProps> = ({ lat, long, area }) => {
+  const [cameraSettings, setCameraSettings] = useState<CameraSettings>({
+    position: [0, 2000, 2000],
     fov: 60,
   });
 
   const handleDimensionsCalculated = (dimensions: TerrainDimensions) => {
-    // Calculate camera position and FOV based on terrain dimensions
-    const maxDimension = Math.max(dimensions.width, dimensions.height);
-    const distance = maxDimension * 2; // Increased distance for better overview
-    const elevation = Math.max(dimensions.maxElevation * 3, distance); // Ensure enough height to see everything
-
-    // Use a wider FOV and position the camera further back
-    const fov = 60; // Fixed FOV for consistent viewing
+    console.log("dimensions", dimensions);
+    // const maxDimension = Math.max(dimensions.width, dimensions.height)
+    const maxDimension = 2020;
+    console.log(maxDimension);
+    const distance = maxDimension * 2;
+    const elevation = Math.max(dimensions.maxElevation * 3, distance);
+    console.log(elevation);
+    const fov = 60;
 
     setCameraSettings({
-      position: [0, elevation, distance] as [number, number, number],
+      position: [0, 20000, 20000],
       fov: fov,
     });
+
+    console.log(cameraSettings.position);
   };
 
   return (
-    <div className="w-full h-screen bg-gray-900">
+    <div className="w-full h-screen">
       <Canvas
         camera={{
           position: cameraSettings.position,
           fov: cameraSettings.fov,
-          far: 1000000, // Increased far plane for larger scenes
+          far: 1000000,
         }}
         shadows
       >
@@ -224,8 +360,8 @@ const TerrainScene: React.FC = () => {
           enableDamping
           dampingFactor={0.05}
           minDistance={100}
-          maxDistance={100000} // Increased max distance
-          maxPolarAngle={Math.PI / 2.1} // Prevent camera from going below the ground
+          maxDistance={100000}
+          maxPolarAngle={Math.PI / 2.1}
         />
         <Environment preset="sunset" />
         <Terrain onDimensionsCalculated={handleDimensionsCalculated} />
